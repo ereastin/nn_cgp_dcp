@@ -9,12 +9,11 @@ import boto3
 import xarray as xr
 import xarray_regrid
 import dask
-from dask import array
-from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
 from cdo import *
 import time
 import subprocess
+import json
 
 sys.path.append('/home/eastinev/AI')
 import paths as pth
@@ -50,10 +49,10 @@ DT_SPLITS = {
     ], 
 }
 
-#YEARS = list(range(2004, 2021))
-YEARS = list(range(1979, 1985))
-MONTHS = [9] # list(range(3, 9))
-WEEKS = [0] # list(range(4))
+YEARS = list(range(2004, 2021))
+#YEARS = list(range(1979, 1985))
+MONTHS = list(range(3, 9))
+WEEKS = list(range(4))
 
 CLOUD = False
 EXP = 'cus'
@@ -66,23 +65,20 @@ CONUS_LAT = slice(18, 58) # (18.5, 58)
 CUS_LON = slice(-110 - 1, -70 + 1)
 CUS_LAT = slice(51 + 1, 25 - 1)  # mswep has these backwards, need buffer for remap
 F = 'CTRL'
-
-'''
-# CUS
-# MERRA selection criteria
-self.merra_regrid = {'do': False, 'target_grid': None}
-self.merra_vars = ['U', 'V', 'OMEGA', 'H', 'T', 'QV']  # if interested could use cloud ice and liquid mass mixing ratios?
-
-# MSWEP selection criteria
-self.mswep_regrid = {'do': True, 'target_grid': './pgrid.nc'} 
-'''
-
 LEV = np.array([
     1000, 975, 950, 925, 900, 875, 850,
     825, 775, 700, 600, 550, 450, 400, 350, 300,
     250, 200, 150, 100, 70, 
     50, 40, 30, 20, 10, 7, 3
 ])
+# weeks without a single detected MCS
+RM_WEEKS = [
+    (2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2),
+    (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0),
+    (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3),
+    (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0),
+    (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)
+]
 ## ================================================================================
 def main():
     #args = sys.argv
@@ -250,9 +246,45 @@ def make_str(time_id):
     return (t_start, t_end)
 
 # -----------------------------------------------------------------------------
-def get_time_strs():
-    t_strs = [(l[0], l[1], l[2]) for l in list(product(YEARS, MONTHS, WEEKS))]
+def get_time_strs(years=YEARS, months=MONTHS, weeks=WEEKS):
+    t_strs = [(l[0], l[1], l[2]) for l in list(product(years, months, weeks))]
     return t_strs
+
+# -----------------------------------------------------------------------------
+def write_t_strs(years, months, weeks, model_name):
+    t_strs = get_time_strs(years, months, weeks)
+    dry = []
+    for t in RM_WEEKS:
+        if t in t_strs:
+            t_strs.pop(t_strs.index(t))
+            dry.append(t)
+
+    # this is only run once, so can leave as random seed if wanted
+    rng = np.random.default_rng(seed=4207765)
+    rng.shuffle(t_strs)
+
+    l = len(t_strs)
+    tr, v, te = int(.80 * l), int(.10 * l), int(.10 * l)
+    d = l - (tr + v + te)
+    if d > 0:
+        v += 1
+        te += 1
+
+    train = t_strs[:tr]
+    val = t_strs[tr:tr + v]
+    test = t_strs[tr + v:]
+    # use all cesm for testing
+    cesm = get_time_strs(list(range(1979, 1984)), months, weeks)
+    data = {
+        'train': train,
+        'val': val,
+        'test': test,
+        'dry': dry,
+        'all': train + val + test + dry,
+        'cesm': cesm
+    }
+    with open(f'./models/{model_name}/data_splits.json', 'w') as f:
+        json.dump(data, f)
 
 # -----------------------------------------------------------------------------
 def _get_wk_days_leap(year, month, week):
@@ -263,7 +295,7 @@ def _get_wk_days_leap(year, month, week):
 
 # -----------------------------------------------------------------------------
 def _get_wk_days_no_leap(year, month, week):
-    # CESM data uses no leap years AFAIK
+    # CESM data uses no leap years
     n_days = DPM[month - 1]
     dates = DT_SPLITS[n_days][week] + np.datetime64(f'{year}-{str(month).zfill(2)}')
     return dates
@@ -300,6 +332,14 @@ def _get_merra_by_time(dt_range, N):
     return merra_fs
 
 # -----------------------------------------------------------------------------
+def _get_merra_precip_by_time(dt_range, N):
+    # filenaming: MERRA2_300.tavg1_2d_flx_Nx.20080402.SUB.nc
+    dt_strs = [pd.Timestamp(dt).strftime('%Y%m%d') + '.SUB.nc' for dt in dt_range]
+    merra_base = f'MERRA2_{N}.tavg1_2d_flx_Nx.'
+    merra_fs = [os.path.join(pth.MERRA_PRECIP,  merra_base + dt) for dt in dt_strs]
+    return merra_fs
+
+# -----------------------------------------------------------------------------
 def _get_mswep_by_time(dt_range, forecast_step=0):
     dt_range = np.arange(dt_range[0], dt_range[-1] + 1, np.timedelta64(3, 'h'))
     dt_range += np.timedelta64(3 * forecast_step, 'h')
@@ -324,7 +364,7 @@ def _get_cesm_merge_by_time(year, month, week, exp='CTRL'):
 
 # -----------------------------------------------------------------------------
 def _get_filepaths(year, month, week, exp, forecast=False, cesm_exp=''):
-    # MERRA stuff
+    # MERRA, CESM stuff
     base = os.path.join(pth.SCRATCH, exp)
     source_rw_pth = os.path.join(base, f'LSF_{year}_{str(month).zfill(2)}_{week}{cesm_exp}.nc')
 

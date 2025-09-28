@@ -23,7 +23,6 @@ from dask.distributed import Client, LocalCluster
 import pandas as pd
 
 # custom imports
-from PrecipDataset import PrecipDataset
 from OTPrecipDataset import OTPrecipDataset
 from Networks import *
 from InceptUNet import IRNv4UNet
@@ -49,7 +48,7 @@ LEV = np.array([
 ])
 
 COMP = False
-HOURLY = False
+HOURLY = True
 DAILY = False
 SEASONAL = False
 ANNUAL = False
@@ -58,7 +57,7 @@ PDF = False
 MCS = False
 RET_AS_TNSR = False
 CESM = True
-CESM_EXP = '.2K'
+CESM_EXP = '.CTRL'
 # these dont seem to matter for testing..?
 C, D, H, W = 6, 28, 81, 145
 Q_SCALE_SUM = np.array([0.73947986, 0.79641958, 0.82545568, 0.85676614, 0.8690772,  0.85588648,
@@ -109,16 +108,14 @@ def main():
     parser = ArgumentParser()
     parser.add_argument('model_name', type=str)
     parser.add_argument('-e', '--exp', type=str)
-    parser.add_argument('-sn', '--season', type=str)
     parser.add_argument('-t', '--tag', type=str, default='')
     parser.add_argument('-v', '--var', type=str, default='')
     args = parser.parse_args()
 
     model_name = args.model_name
-    exp, season = args.exp, args.season
+    exp = args.exp
     tag = args.tag
     test_var = args.var
-    model_id_tag = season + tag
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -126,11 +123,16 @@ def main():
         device = torch.device('cpu')
         print('Using CPU')
 
-    test_loader = prep_loader(exp, season)
-    model = prep_model(model_name, model_id_tag)
-    model = load_model(model, model_name, model_id_tag, device)
+    if CESM:
+        mode = 'cesm'
+        tag += f'_CESM{CESM_EXP}'
+    else:
+        mode = 'test'
 
-    if CESM: model_id_tag += f'_CESM{CESM_EXP}'
+    test_loader = prep_loader(model_name, exp, mode=mode)
+    model = prep_model(model_name)
+    model = load_model(model, model_name, device)
+
     n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
     cluster = LocalCluster(n_workers=n_cpus)
     print(cluster, flush=True)
@@ -165,13 +167,13 @@ def main():
             test_loader,
             device,
             exp,
-            season,
-            note=model_id_tag,
+            note=tag,
             perturb_dict=perturb_dict,
         ) 
 
 # ---------------------------------------------------------------------------------
-def check_accuracy(model, model_name, loader, device, exp, season, note='', perturb_dict={}, df_list=None):
+def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict={}, df_list=None):
+    _, season, _ = model_name.split('_')
     # CUS 3D Inc MERRA2 grid
     gridshape = (53, 65)  # (H, W)
     extent = (-110, -70, 25, 51)
@@ -182,13 +184,10 @@ def check_accuracy(model, model_name, loader, device, exp, season, note='', pert
     bias_plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'bias'}
     clima_plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'clima'}
 
-    # steps per day e.g. (24 / spd) hourly data
-    spd = 8
-
     # For un-standardizing predicted/target precip data
-    with open(f'./cus_norm_vars_{season}_mcs.json', 'r') as f:
+    with open(f'./models/{model_name}/norm_vars.json', 'r') as f:
         stats = json.load(f)
-        # for using CESM data
+        # for using CESM data -- these should be pre-stored now
         stats['Z3mn'] = stats['Hmn']
         stats['Z3std'] = stats['Hstd']
         stats['Qmn'] = stats['QVmn']
@@ -321,9 +320,9 @@ def check_accuracy(model, model_name, loader, device, exp, season, note='', pert
 
     # this handles the forecasting step leakage into other seasons by dropping..
     # do custom seasons instead? or set back input fields instead of set forward precip field?
-    if season == 'sum':
+    if season == 'JJA':
         tmask = ~((complete_pred.time.dt.month == 9) & (complete_pred.time.dt.day == 1))
-    elif season == 'spr':
+    elif season == 'MAM':
         tmask = ~((complete_pred.time.dt.month == 6) & (complete_pred.time.dt.day == 1))
 
     complete_pred = complete_pred.sel(time=tmask)
@@ -346,7 +345,7 @@ def check_accuracy(model, model_name, loader, device, exp, season, note='', pert
 
     # Hourly statistics
     if HOURLY:
-        hourly_stats(complete, bias_plot_params, clima_plot_params, spd, season, model_name, note)
+        hourly_stats(complete, bias_plot_params, clima_plot_params, season, model_name, note)
 
     # Daily statistics
     if DAILY:
@@ -354,20 +353,20 @@ def check_accuracy(model, model_name, loader, device, exp, season, note='', pert
 
     # Seasonal statistics
     if SEASONAL:
-        seasonal_stats(complete, bias_plot_params, clima_plot_params, spd, model_name, note)
+        seasonal_stats(complete, bias_plot_params, clima_plot_params, model_name, note)
 
     # Annual statistics
     if ANNUAL:
-        annual_stats(complete_pred, complete_obs, bias_plot_params, clima_plot_params, spd, model_name, note)
+        annual_stats(complete_pred, complete_obs, bias_plot_params, clima_plot_params, model_name, note)
 
 # ---------------------------------------------------------------------------------
 def feature_importance_stats(test_loss, all_ets, exp, season, perturb_dict, df_list):
     # RMSE/ETS importance metrics:
     # to save rmse and ets for each test item
     #df = pd.DataFrame({'rmse': np.sqrt(test_loss), 'ets': all_ets})
-    #df.to_csv(f'./{exp}_{season}_test_stats.csv')
+    #df.to_csv(f'./models/{model_name}/test_stats.csv')
     #return
-    ctrl_df = pd.read_csv(f'./{exp}_{season}_test_stats.csv')
+    ctrl_df = pd.read_csv(f'./models/{model_name}/test_stats.csv')
     ctrl_loss = ctrl_df['rmse'].to_numpy()
     ctrl_ets = ctrl_df['ets'].to_numpy()
     Irmse = (np.sqrt(test_loss) - ctrl_loss) / ctrl_loss
@@ -394,6 +393,7 @@ def feature_importance_stats(test_loss, all_ets, exp, season, perturb_dict, df_l
     return df_list
 
 # ---------------------------------------------------------------------------------
+# TODO: this needs args added or otherwise some fixing
 def run_feature_importance(test_var):
     df_list = []
     try:
@@ -422,11 +422,11 @@ def run_feature_importance(test_var):
 
             out_df = pd.concat(df_list)
             print(out_df)
-            out_df.to_csv(f'./{exp}_{season}_{v}_shuffle_add.csv')
+            out_df.to_csv(f'./models/{model_name}/{v}_shuffle.csv')
     except KeyboardInterrupt:
         out_df = pd.concat(df_list)
         print(out_df)
-        out_df.to_csv(f'./{exp}_{season}_{v}_shuffle_add.csv')
+        out_df.to_csv(f'./models/{model_name}/{v}_shuffle.csv')
 
 # ---------------------------------------------------------------------------------
 def calc_importance_stats(arr):
@@ -436,8 +436,8 @@ def calc_importance_stats(arr):
     return mn, md, iqr25, iqr75
 
 # ---------------------------------------------------------------------------------
-def prep_model(model_name, tag):
-    path = os.path.join(f'./models/{model_name}/hyperparams_{tag}.json')
+def prep_model(model_name):
+    path = os.path.join(f'./models/{model_name}/hyperparams.json')
     with open(path, 'r') as f:
         hps = json.load(f)
     print(f'Loading hyperparams for model {model_name}:\n {hps}')
@@ -447,32 +447,22 @@ def prep_model(model_name, tag):
     bias = hps['bias']
     drop_p = hps['drop_p']
 
-    # create specified model
-    match model_name:
-        case 'inc':
-            return IRNv4UNet(C)
-        case 'inc3d':
-            return Simple(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
-        case 'unet':
-            return MultiUNet(n_vars=C, depth=D, init_c=64, embedding_dim=32, bias=True)
-        case _:
-            print(f'Model "{model_name}" not valid')
-            sys.exit(-21)
+    return Simple(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
 
 # ---------------------------------------------------------------------------------
-def prep_loader(exp, season):
+def prep_loader(model_name, exp, mode='test'):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK']) if RET_AS_TNSR else 0
-    test_ds = OTPrecipDataset('test', exp, season, standardize=False, shuffle=False, ret_as_tnsr=RET_AS_TNSR, cesm=CESM, cesm_exp=CESM_EXP)
-    # probs need to add this in training too
+    test_ds = OTPrecipDataset(mode, exp, model_name, standardize=False, shuffle=False, ret_as_tnsr=RET_AS_TNSR, cesm_exp=CESM_EXP)
     def collate(batch):
         return batch
+
     test_loader = DataLoader(test_ds, batch_size=None, shuffle=False, num_workers=n_workers, collate_fn=collate, pin_memory=False)
 
     return test_loader
 
 # ---------------------------------------------------------------------------------
-def load_model(model, model_name, tag, device):
-    path = os.path.join(f'./models/{model_name}/params_{tag}.pth')
+def load_model(model, model_name, device):
+    path = os.path.join(f'./models/{model_name}/params.pth')
     model.load_state_dict(torch.load(path, map_location=device))
  
     return model

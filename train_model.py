@@ -12,9 +12,10 @@ from datetime import timedelta
 from argparse import ArgumentParser
 import os
 import sys
-sys.path.append('/home/eastinev/AI')
+sys.path.append('/home/eastinev/ai')
 import time
 ## personal imports
+# models
 from TrainHelper import TrainHelper
 from InceptUNet3D import IRNv4_3DUNet
 from Incept3D import IRNv4_3D
@@ -23,16 +24,16 @@ from v2 import UNet, MultiUNet
 from simple import Simple
 from simple2d import Simple2
 from Dummy import Dummy
+# datasets
 from PrecipDataset import PrecipDataset
 from OTPrecipDataset import OTPrecipDataset
+# other
 from decorators import timeit
 from perceptual import SqueezeNet
 
 # for Lazy module dry-runs.. handle this better for other input shapes
-C, D, H, W = 6, 28, 81, 145 #6, 16, 80, 144
+C, D, H, W = 6, 28, 81, 145
 FROM_LOAD = False
-MIN, MAX = np.log(1.1), np.log(101)
-RET_AS_TNSR = True
 
 # =================================================================================
 def main():
@@ -42,16 +43,14 @@ def main():
     parser.add_argument('-s', '--search', action='store_true')
     parser.add_argument('-d', '--ddp', action='store_true')
     parser.add_argument('-e', '--exp', type=str)
-    parser.add_argument('-sn', '--season', type=str)
     parser.add_argument('-t', '--tag', type=str, default='')
     args = parser.parse_args()
 
     model_name, n_epochs, ddp = args.model_name, args.n_epochs, args.ddp
-    exp, season = args.exp, args.season
+    exp = args.exp
     tag = args.tag
     search = args.search
-    model_id_tag = season + tag
-    weekly = True  # check memory on this vs monthly.. max ~3GB per month so why fail with 16GB per cpu?
+    model_id_tag = tag
 
     print(f'Job ID: {os.environ["SLURM_JOBID"]}', flush=True)
 
@@ -77,8 +76,6 @@ def main():
         lin_act = np.random.choice(np.append(np.linspace(0.05, 0.3, 10), np.array([1.0])))
         Na = np.random.choice(np.arange(1, 6))
         Nb, Nc = 2 * Na, Na
-        # just force to 1 each
-        # Na, Nb, Nc = 1, 1, 1
         lr = np.random.choice(np.logspace(-5, -1, 20))
         max_lr = lr * 50
         wd = np.random.choice(np.append(np.logspace(-3, -1, 10), np.linspace(0, 0.5, 5)))
@@ -96,28 +93,20 @@ def main():
         Na, Nb, Nc = 5, 10, 5
         lr = 1e-4
         wd = 0.15
-        drop_p = 0#.05  # probably just leave as 0 these dont do great with CNNs?
+        drop_p = 0  # probably just leave as 0 these dont do great with CNNs?
         bias = True
         opt_type = 'adamw'
         loss_fn = SqueezeNet().to(local_rank).float()
-        #loss_fn = comp_loss_fn
         hps = {
-            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': 'mse',
+            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': 'SqueezeNet+mse+negReLU',
             'optim': opt_type, 'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
 
-    #model = UNet(depth=D, init_c=32, dim=3, bias=bias).to(local_rank).float()
-    #model = MultiUNet(n_vars=C, depth=D, spatial_dim=2, init_c=128, embedding_dim=32, bias=bias).to(local_rank).float()
+    # Create model
     model = Simple(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
-    #model = Simple2(C * D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
-    #model = IRNv4_3DUNet(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
-    # model = Dummy().to(local_rank).float()
 
-    if FROM_LOAD:
-        model = load_model(model, model_name, model_id_tag, local_rank)
-    else:
-        # dry-run for Lazy modules -- must be called before DDP init
-        model(torch.ones(1, C, D, H, W).to(local_rank))
+    # dry-run for Lazy modules -- must be called before DDP init
+    model(torch.ones(1, C, D, H, W).to(local_rank))
 
     # Convert model to DDP-accessible type for distributed training
     if ddp: model = DDP(model, device_ids=[local_rank])
@@ -130,11 +119,11 @@ def main():
     #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[200, 250, 350], gamma=0.5)
 
     # Create DataLoaders
-    train_loader, val_loader, sampler = prep_loaders(exp, season, rank, world_size, weekly=weekly, ddp=ddp)
+    train_loader, val_loader, sampler = prep_loaders(exp, model_name, rank, world_size, weekly=weekly, ddp=ddp)
     train_loader_len = len(train_loader.dataset) + (len(train_loader.dataset) % world_size) if ddp else len(train_loader.dataset)
  
     # Create TrainHelper to manage training progress
-    if rank == 0: helper = TrainHelper(model_name, tag=model_id_tag, hyperparams=hps)
+    if rank == 0: helper = TrainHelper(model_name, hyperparams=hps)
 
     # Create CPU backend for aggregating losses across GPUs
     if ddp: cpu_grp = dist.new_group(backend='gloo')
@@ -152,7 +141,6 @@ def main():
             if ddp: sampler.set_epoch(epoch)  # necessary for DataLoaders w/DDP to correctly shuffle
 
             # Train epoch
-            #l = train(model, local_rank, train_loader, optimizer, loss_fn)
             l, n = train(model, local_rank, train_loader, optimizer, loss_fn)
 
             # Collect training loss and validate
@@ -164,7 +152,6 @@ def main():
                 dist.all_gather(all_n, n, group=cpu_grp)
                 val_loss = torch.tensor([0.0], device=torch.device('cpu'))
                 if rank == 0:
-                    #train_loss = torch.sum(torch.tensor(all_loss)) / train_loader_len
                     train_loss = torch.sum(torch.tensor(all_loss)) / torch.sum(torch.tensor(all_n))
                     if train_loss is torch.nan: raise ValueError  # TODO: this doesn't actually work?
                     val_loss = validate(model, local_rank, val_loader, loss_fn, ddp=ddp)
@@ -174,10 +161,8 @@ def main():
                 train_loss = l / n
                 if train_loss is torch.nan: raise ValueError
                 val_loss = validate(model, local_rank, val_loader, loss_fn, ddp=ddp)
-                #val_loss = 0
 
             # Step LR scheduler
-            #scheduler.step()
             scheduler.step(val_loss)
             tmp_lr = scheduler.get_last_lr()[0]
             if tmp_lr != curr_lr:
@@ -208,7 +193,6 @@ def main():
         if rank == 0:
             t2 = time.time()
             print(f'Run completed in {t2 - t1}', flush=True)
-        #helper._save_point(model, epoch)
 
     except ValueError as e:
         print(f'[ERROR]: Loss is nan @ epoch {epoch} with message {e}, exiting...')
@@ -220,31 +204,20 @@ def main():
         cleanup(ddp)
 
 # =================================================================================
-#@timeit
 def train(model, device, train_loader, optimizer, loss_fn):
     try:
-        train_loss = 0
         losses, Ns = [], []
         model.train()
         for i, (source, target, tt) in enumerate(train_loader):
-            if not RET_AS_TNSR:
-                # compute
-                source = source.to_dataarray().to_numpy()
-                source = torch.tensor(source).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
-                target = target.to_dataarray().to_numpy()
-                target = torch.tensor(target).permute(1, 0, 2, 3) # return as (time, var, lat, lon) 
-
             source, target = source.to(device).float(), target.to(device).float()
             optimizer.zero_grad()
             out = model(source)
             loss = loss_fn(out, target)
-            #train_loss += loss.item()
             losses.append(loss.item())
             Ns.append(source.shape[0])
             loss.backward()
             optimizer.step()
         return torch.sum(torch.tensor(losses) * torch.tensor(Ns)), torch.sum(torch.tensor(Ns)) 
-        #return torch.tensor(train_loss)
     except Exception as e:
         print(f'[ERROR]: Training on {device} @ {time.time()} -- {e}', flush=True)
         raise e
@@ -254,7 +227,7 @@ def train(model, device, train_loader, optimizer, loss_fn):
 def validate(model, device, val_loader, loss_fn, ddp=False):
     try:
         losses, Ns = [], []
-        model.eval()
+        model.eval()  # think this is OK here but make sure.?
         val_model = model if not ddp else model.module
         with torch.no_grad():
             for i, (source, target, tt) in enumerate(val_loader):
@@ -332,36 +305,6 @@ def comp_loss_fn(pred, target):
     return mse_loss + 0.35 * fft_loss
 
 # ---------------------------------------------------------------------------------
-def prep_model(model_name, tag, in_channels=64):
-    path = os.path.join(f'./models/{model_name}/hyperparams_{tag}.json')
-    with open(path, 'r') as f:
-        hps = json.load(f)
-    Na, Nb, Nc = hps['Na'], hps['Nb'], hps['Nc']
-    base = hps['base']
-    lin_act = hps['lin_act']
-    bias = hps['bias']
-    drop_p = hps['drop_p']
-
-    # create specified model
-    match model_name:
-        case 'inc':
-            return IRNv4UNet(in_channels)
-        case 'inc3d':
-            return IRNv4_3DUNet(in_channels, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
-        case 'unet':
-            return UNet(16)
-        case _:
-            print(f'Model "{model_name}" not valid')
-            sys.exit(-21)
-
-# ---------------------------------------------------------------------------------
-def load_model(model, model_name, tag, device):
-    path = os.path.join(f'./models/{model_name}/params_{tag}.pth')
-    model.load_state_dict(torch.load(path, map_location=device))
-
-    return model
-
-# ---------------------------------------------------------------------------------
 def prep_optimizer(model_params, lr=1e-4, wd=1e-2, opt_type='adamw'):
     match opt_type:
         case 'adamw':
@@ -374,28 +317,44 @@ def prep_optimizer(model_params, lr=1e-4, wd=1e-2, opt_type='adamw'):
     return optimizer
 
 # ---------------------------------------------------------------------------------
-def prep_loaders(exp, season, rank, world_size, weekly=False, ddp=False):
+def prep_loaders(exp, model_name, rank, world_size, ddp=False):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
     prefetch = 1
     shuffle = True
-    train_ds = OTPrecipDataset('train', exp, season, weekly=weekly, shuffle=shuffle, ret_as_tnsr=RET_AS_TNSR)
-    val_ds = OTPrecipDataset('val', exp, season, weekly=weekly, ret_as_tnsr=RET_AS_TNSR)
+    # Create datasets
+    train_ds = OTPrecipDataset('train', exp, model_name, shuffle=shuffle)
+    val_ds = OTPrecipDataset('val', exp, model_name)
 
+    # Create sampler
     sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if ddp else None
 
+    # define collate function (necessary for using datetime objs as identifiers)
+    def collate(batch):
+        return batch
+
+    # Create training loader
     if sampler:
-        train_loader = DataLoader(train_ds, batch_size=None, sampler=sampler, num_workers=n_workers, prefetch_factor=prefetch)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=None,
+            sampler=sampler,
+            num_workers=n_workers,
+            collate_fn=collate,
+            prefetch_factor=prefetch
+        )
     else:
         train_loader = DataLoader(
             train_ds,
             batch_size=None,
             shuffle=shuffle,
             num_workers=n_workers,
+            collate_fn=collate,
             prefetch_factor=prefetch,
             persistent_workers=True
         )
 
-    val_loader = DataLoader(val_ds, batch_size=None, num_workers=n_workers, prefetch_factor=prefetch)
+    # Create validation loader
+    val_loader = DataLoader(val_ds, batch_size=None, num_workers=n_workers, collate_fn=collate, prefetch_factor=prefetch)
 
     return train_loader, val_loader, sampler
 

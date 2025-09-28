@@ -71,7 +71,6 @@ def get_times(time_id):
     good_tracks, track_idx = read_stats(year, time_id)
     # NOTE: track_idx are offset by -1 relative to mask value
 
-    # loop through all tracks..?
     times = np.array([], dtype='datetime64')
     for i in range(len(good_tracks.tracks)):
         track = good_tracks.isel(tracks=i)

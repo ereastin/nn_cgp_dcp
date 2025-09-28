@@ -11,11 +11,10 @@ def main():
 
 # ---------------------------------------------------------------------------------
 class TrainHelper:
-    def __init__(self, model_name, tag='', hyperparams={}, save_every=5):
-        self.tag = tag
+    def __init__(self, model_name, hyperparams={}, save_every=5):
         self.hyperparams = hyperparams
         self.save_every = save_every
-        self.model_path = f'/home/eastinev/AI/incept/models/{model_name}/'
+        self.model_path = f'./models/{model_name}/'
         self.train_loss = []
         self.val_loss = []
         self._improve_thresh = 100
@@ -42,11 +41,11 @@ class TrainHelper:
         ax.set(xlabel='epoch', ylabel='loss', ylim=(0, 2 * np.amax(self.train_loss)))
         plt.legend()
         fig.tight_layout()
-        sv_pth = os.path.join(self.model_path, f'loss_{self.tag}.png')
+        sv_pth = os.path.join(self.model_path, f'model_loss.png')
         plt.savefig(sv_pth, dpi=300.0)
 
     def _save_hyperparams(self):
-        sv_pth = os.path.join(self.model_path, f'hyperparams_{self.tag}.json')
+        sv_pth = os.path.join(self.model_path, f'hyperparams.json')
         with open(sv_pth, 'w') as f:
             json.dump(self.hyperparams, f, indent=4)
 
@@ -68,7 +67,7 @@ class TrainHelper:
 
     def _save_point(self, model, epoch):
         state = model.state_dict()
-        sv_pth = os.path.join(self.model_path, f'params_{self.tag}.pth')
+        sv_pth = os.path.join(self.model_path, f'params.pth')
         torch.save(state, sv_pth)
         self._last_save = epoch
         print(f'Model state saved at epoch {epoch}')

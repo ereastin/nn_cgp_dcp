@@ -17,7 +17,7 @@ class TrainHelper:
         self.model_path = f'./models/{model_name}/'
         self.train_loss = []
         self.val_loss = []
-        self._improve_thresh = 100
+        self._improve_thresh = 10
         self._base_epoch = 0
         self._last_save = 0
         self._save_hyperparams()
@@ -56,7 +56,7 @@ class TrainHelper:
             else:
                 self._plot_loss()
         except ValueError as e:
-            print('Zero-length array, can\'t perform requested operations')
+            print("Zero-length array, can't perform requested operations")
 
     def checkpoint(self, model, epoch, search=False):
         if self._stop_early(epoch):

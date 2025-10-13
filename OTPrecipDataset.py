@@ -17,15 +17,7 @@ import file_utils as futils
 
 ## ================================================================================
 STATS = False
-DRY = False
-MCS = False
-RM_WEEKS = [  # weeks without a single detected MCS
-    (2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2),
-    (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0),
-    (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3),
-    (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0),
-    (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)
-]
+DRY = False  # TODO: allow assignment from outside
 
 ## ================================================================================
 def main():
@@ -34,12 +26,10 @@ def main():
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
-        pd = OTPrecipDataset('train', 'cus', 'mcs_JJA_F00h', standardize=False, shuffle=False, ret_as_tnsr=True)
-        return
+        pd = OTPrecipDataset('train', 'cus', 'test_JJA_F00h', standardize=False, sel_mcs=True)
         t1 = time.time()
         for i, (s, t, tt) in enumerate(pd):
-            if int(tt[0].astype(str).split('-')[0]) == 2012:
-                print(1)
+            print(tt)
 
     if STATS: pd.get_stats()
     t2 = time.time()
@@ -47,7 +37,18 @@ def main():
 
 ## ================================================================================
 class OTPrecipDataset(Dataset):
-    def __init__(self, mode, exp, model_name, standardize=True, shuffle=False, ret_as_tnsr=True, cesm_exp=''):
+    def __init__(
+        self,
+        mode,
+        exp,
+        model_name,
+        standardize=True,
+        shuffle=False,
+        ret_as_tnsr=True,
+        sel_mcs=True,
+        drop_vars=[],
+        cesm_exp=''
+    ):
         super(OTPrecipDataset, self).__init__()
         self.mode = mode  # train, val, test, all, cesm
         self.exp = exp  # rename? identifies cus dir rn
@@ -55,13 +56,15 @@ class OTPrecipDataset(Dataset):
         self._STANDARDIZE = standardize
         self._SHUFFLE = shuffle
         self._RET_AS_TNSR = ret_as_tnsr
+        self._MCS = sel_mcs
         self._CESM = True if mode == 'cesm' else False
         self._CESM_EXP = cesm_exp
+        self._drop_vars = drop_vars
 
         _, self.season, forecast = self.model_name.split('_')
         self._LEAD_TIME_HOURS = int(forecast[1:3])
         self._FORECAST = False if self._LEAD_TIME_HOURS == 0 else True
-        n_months = 6 if self.season == 'MAMJJA' else 3
+        n_months = len(self.season)
         mnth_offset = 6 if self.season == 'JJA' else 3
 
         yrs = list(range(2004, 2021)) if not self._CESM else list(range(1979, 1984))
@@ -70,8 +73,10 @@ class OTPrecipDataset(Dataset):
 
         data_splits_path = f'./models/{self.model_name}/data_splits.json'
         if not os.path.exists(data_splits_path):
+            print(f'writing data splits {data_splits_path}')
             futils.write_t_strs(yrs, mnths, wks, self.model_name)
         with open(data_splits_path, 'r') as f:
+            print(f'loading data splits for mode {mode}: {data_splits_path}')
             data_splits = json.load(f)
 
         match mode:
@@ -105,6 +110,21 @@ class OTPrecipDataset(Dataset):
             with open(self.stats_pth, 'r') as f:
                 self.stats = json.load(f)
 
+        print(f'''Dataset status :
+              MODEL NAME: {self.model_name}
+              EXPERIMENT: {self.exp}
+              MODE: {mode}
+              FORECAST: {self._FORECAST}
+              LEAD TIME (HRS): {self._LEAD_TIME_HOURS}
+              MCS: {self._MCS}
+              DRY: {DRY}
+              CESM: {self._CESM}
+              CESM_EXP: {self._CESM_EXP}
+              STANDARDIZE: {self._STANDARDIZE}
+              SHUFFLE: {self._SHUFFLE}
+              RETURN TENSOR: {self._RET_AS_TNSR}
+        ''')
+
     # -----------------------------------------------------------------------------
     def __len__(self):
         return len(self.t_strs)
@@ -112,7 +132,14 @@ class OTPrecipDataset(Dataset):
     # -----------------------------------------------------------------------------
     def __getitem__(self, idx):
         (year, month, week) = self.t_strs[idx] 
-        source_rw_pth, target_rw_pth = futils._get_filepaths(year, month, week, self.exp, forecast=self._FORECAST, cesm_exp=self._CESM_EXP)
+        source_rw_pth, target_rw_pth = futils._get_filepaths(
+            year,
+            month,
+            week,
+            self.exp,
+            forecast=self._FORECAST,
+            cesm_exp=self._CESM_EXP
+        )
 
         # now datetime arange
         if self._CESM:
@@ -121,7 +148,7 @@ class OTPrecipDataset(Dataset):
             time_id = futils._get_wk_days_leap(year, month, week)
 
         # Filter for MCS-present timestamps
-        if MCS:
+        if self._MCS:
             t = mcs.get_times(time_id)  # this returns empty list if no MCS present:
             # if ds.sel(time=[]) this selects NONE, if ds.drop_sel(time=[]) this drops NONE
         else:
@@ -215,8 +242,8 @@ class OTPrecipDataset(Dataset):
 
     # -----------------------------------------------------------------------------
     def read_source(self, in_file, sel_time):
-        ds = xr.open_mfdataset(in_file)
-        ds = ds.drop_sel(time=sel_time) if DRY and MCS else ds.sel(time=sel_time)
+        ds = xr.open_mfdataset(in_file, drop_variables=self._drop_vars)
+        ds = ds.drop_sel(time=sel_time) if DRY and self._MCS else ds.sel(time=sel_time)
 
         if STATS:
             for v in self.merra_vars:
@@ -228,7 +255,7 @@ class OTPrecipDataset(Dataset):
 
         if self._STANDARDIZE:
             for v in ds.variables:
-                if v in ['time', 'lat', 'lon', 'plev', 'lev']:
+                if v in ['time', 'lat', 'lon', 'plev', 'lev'] + self._drop_vars:
                     continue
                 ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
 
@@ -237,7 +264,7 @@ class OTPrecipDataset(Dataset):
     # -----------------------------------------------------------------------------
     def read_target(self, in_file, sel_time):
         ds = xr.open_mfdataset(in_file)
-        ds = ds.drop_sel(time=sel_time) if DRY and MCS else ds.sel(time=sel_time)
+        ds = ds.drop_sel(time=sel_time) if DRY and self._MCS else ds.sel(time=sel_time)
  
         if STATS:
             v = 'precipitation'

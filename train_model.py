@@ -29,11 +29,12 @@ from PrecipDataset import PrecipDataset
 from OTPrecipDataset import OTPrecipDataset
 # other
 from decorators import timeit
-from perceptual import SqueezeNet
+from loss import SqueezeNet
 
 # for Lazy module dry-runs.. handle this better for other input shapes
-C, D, H, W = 6, 28, 81, 145
+C, D, H, W = 4, 28, 81, 145
 FROM_LOAD = False
+MCS = True
 
 # =================================================================================
 def main():
@@ -44,13 +45,14 @@ def main():
     parser.add_argument('-d', '--ddp', action='store_true')
     parser.add_argument('-e', '--exp', type=str)
     parser.add_argument('-t', '--tag', type=str, default='')
+    parser.add_argument('-x', '--drop', nargs='+', default=[])
     args = parser.parse_args()
 
     model_name, n_epochs, ddp = args.model_name, args.n_epochs, args.ddp
     exp = args.exp
     tag = args.tag
     search = args.search
-    model_id_tag = tag
+    drop_vars = args.drop
 
     print(f'Job ID: {os.environ["SLURM_JOBID"]}', flush=True)
 
@@ -88,17 +90,17 @@ def main():
             'optim': opt_type, 'lr': lr, 'max_lr': max_lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
     else:
-        base = 36
+        base = 30
         lin_act = .1
         Na, Nb, Nc = 5, 10, 5
         lr = 1e-4
-        wd = 0.15
+        wd = 0.01
         drop_p = 0  # probably just leave as 0 these dont do great with CNNs?
         bias = True
         opt_type = 'adamw'
-        loss_fn = SqueezeNet().to(local_rank).float()
+        loss_fn = SqueezeNet(model_name).to(local_rank).float()
         hps = {
-            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': 'SqueezeNet+mse+negReLU',
+            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': 'SqueezeNet+Quantile+negReLU',
             'optim': opt_type, 'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
 
@@ -115,11 +117,11 @@ def main():
     optimizer = prep_optimizer(model.parameters(), lr, wd, opt_type)
 
     # Create scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=5, cooldown=0)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=3, cooldown=0)
     #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[200, 250, 350], gamma=0.5)
 
     # Create DataLoaders
-    train_loader, val_loader, sampler = prep_loaders(exp, model_name, rank, world_size, weekly=weekly, ddp=ddp)
+    train_loader, val_loader, sampler = prep_loaders(exp, model_name, rank, world_size, ddp=ddp, drop_vars=drop_vars)
     train_loader_len = len(train_loader.dataset) + (len(train_loader.dataset) % world_size) if ddp else len(train_loader.dataset)
  
     # Create TrainHelper to manage training progress
@@ -245,66 +247,6 @@ def validate(model, device, val_loader, loss_fn, ddp=False):
         return
 
 # ---------------------------------------------------------------------------------
-def huber(pred, target):
-    return F.huber_loss(pred, target, delta=3)
-
-def mse(pred, target):
-    loss = F.mse_loss(pred, target)
-    return loss
-
-def wt_mse(pred, target):
-    wt = torch.abs(target)
-    return F.mse_loss(pred, target, weight=wt)
-
-def mae(pred, target):
-    return F.l1_loss(pred, target)
-
-def wt_mae(pred, target):
-    wt = torch.where(target <= MIN, MIN, target)
-    wt = torch.where(wt >= MAX, MAX, wt)
-    l1 = torch.mean(wt * torch.abs(pred - target))
-    return l1
-
-def pcc(pred, target):
-    t = torch.exp(target) - 1
-    mt = torch.mean(t, dim=(2, 3), keepdim=True)
-    ts = t - mt
-    p = torch.exp(pred) - 1
-    mp = torch.mean(p, dim=(2, 3), keepdim=True)
-    ps = p - mp
-    eps = 0
-    pcc_loss = torch.sum(ps * ts) / torch.sqrt(torch.sum(ps ** 2) * torch.sum(ts ** 2) + eps)
-    return 1 - pcc_loss
-
-def fft(pred, target):
-    p = pred - torch.mean(pred, dim=(2, 3), keepdim=True)
-    t = target - torch.mean(target, dim=(2, 3), keepdim=True)
-    fft_pred = torch.abs(torch.fft.fft2(p, norm='ortho'))# - torch.mean(p, dim=(2, 3), keepdim=True), norm='ortho'))
-    fft_target = torch.abs(torch.fft.fft2(t, norm='ortho'))# - torch.mean(t, dim=(2, 3), keepdim=True), norm='ortho'))
-    fft_wt = torch.log(1 + F.l1_loss(fft_pred, fft_target, reduction='none'))
-    fft_loss = F.l1_loss(fft_pred, fft_target, weight=fft_wt)
-    return fft_loss
-
-def cross_entropy(pred, target):
-    target = target.to(torch.long)
-    #wt = torch.tensor([1/.99, 1/.01, 0, 0, 0]).cuda()
-    loss = F.cross_entropy(pred, target)#, weight=wt)
-    #print(loss.item())
-    return loss
-
-def dice(pred, target):
-    a = pred.contiguous().view(-1)
-    b = target.contiguous().view(-1)
-    return 1 - (2 * (a * b).sum() + 1e-5) / (a.sum() + b.sum() + 1e-5)
-    
-def comp_loss_fn(pred, target):
-    mse_loss = mse(pred, target)
-    #mae_loss = mae(pred, target)
-    fft_loss = fft(pred, target)
-    #return mse_loss + 0.25 * fft_loss
-    return mse_loss + 0.35 * fft_loss
-
-# ---------------------------------------------------------------------------------
 def prep_optimizer(model_params, lr=1e-4, wd=1e-2, opt_type='adamw'):
     match opt_type:
         case 'adamw':
@@ -317,13 +259,13 @@ def prep_optimizer(model_params, lr=1e-4, wd=1e-2, opt_type='adamw'):
     return optimizer
 
 # ---------------------------------------------------------------------------------
-def prep_loaders(exp, model_name, rank, world_size, ddp=False):
+def prep_loaders(exp, model_name, rank, world_size, ddp=False, drop_vars=[]):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
     prefetch = 1
     shuffle = True
     # Create datasets
-    train_ds = OTPrecipDataset('train', exp, model_name, shuffle=shuffle)
-    val_ds = OTPrecipDataset('val', exp, model_name)
+    train_ds = OTPrecipDataset('train', exp, model_name, shuffle=shuffle, sel_mcs=MCS, drop_vars=drop_vars)
+    val_ds = OTPrecipDataset('val', exp, model_name, sel_mcs=MCS, drop_vars=drop_vars)
 
     # Create sampler
     sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if ddp else None

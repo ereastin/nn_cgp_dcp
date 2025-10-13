@@ -14,8 +14,7 @@ from cdo import *
 import time
 import subprocess
 import json
-
-sys.path.append('/home/eastinev/AI')
+sys.path.append('/home/eastinev/ai')
 import paths as pth
 import utils
 
@@ -49,9 +48,9 @@ DT_SPLITS = {
     ], 
 }
 
-YEARS = list(range(2004, 2021))
-#YEARS = list(range(1979, 1985))
-MONTHS = list(range(3, 9))
+#YEARS = list(range(2004, 2021))
+YEARS = list(range(1979, 1984))
+MONTHS = list(range(3, 10))
 WEEKS = list(range(4))
 
 CLOUD = False
@@ -81,9 +80,19 @@ RM_WEEKS = [
 ]
 ## ================================================================================
 def main():
-    #args = sys.argv
-    #F = args[1]
-
+    # Load MSWEPv2 and regrid
+    n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
+    cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)
+    os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+    print(cluster, flush=True)
+    with Client(cluster) as client:
+        print(client, flush=True)
+        cesm_pth = '/scratch/eastinev/cus_cesm/P*.CTRL.nc'
+        cesm = open_mf(cesm_pth)
+        print(cesm)
+        cesm.to_netcdf('./CESM_1979-1983.nc', engine='netcdf4')
+    return
+    ## ======
     t1 = time.time()
     cdo = Cdo(tempdir=pth.TMP)
     cdo.debug = True
@@ -261,6 +270,7 @@ def write_t_strs(years, months, weeks, model_name):
 
     # this is only run once, so can leave as random seed if wanted
     rng = np.random.default_rng(seed=4207765)
+    #rng = np.random.default_rng()
     rng.shuffle(t_strs)
 
     l = len(t_strs)
@@ -497,6 +507,26 @@ def cloud_data():
         # bounding_box=(-110, 24, -70, 52)  # not confident this actually works
     )
     fnames = earthaccess.open(results)
+
+# ---------------------------------------------------------------------------------
+def open_mf(filepath, drop_vars=[], **kwargs):
+    preproc_fn = partial(_select_batch, **kwargs) 
+    ds = xr.open_mfdataset(
+        filepath,
+        preprocess=preproc_fn,
+        drop_variables=drop_vars,
+        concat_dim='time',
+        data_vars='minimal',
+        coords='minimal',
+        combine='nested',
+        compat='override',
+        join='override',
+        parallel=True,
+        chunks='auto',
+        engine='h5netcdf'
+    )
+    return ds
+
 
 ## ================================================================================
 if __name__ == '__main__':

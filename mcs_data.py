@@ -10,7 +10,7 @@ import pandas as pd
 import json
 import os
 import sys
-sys.path.append('/home/eastinev/AI')
+sys.path.append('/home/eastinev/ai')
 import utils
 import paths as pth
 
@@ -79,7 +79,10 @@ def get_times(time_id):
         times = np.append(times, t)
 
     # TODO: if wanting stats for something need to compile in loop above and pass along
-    times = np.unique(times)
+    ## add 2 previous time steps for each
+    times = np.concat([times, times - np.timedelta64(6, 'h'), times - np.timedelta64(3, 'h')])
+    mask = (times >= time_id[0]) & (times < time_id[-1] + np.timedelta64(1, 'D'))
+    times = np.unique(times[mask])
     return times
 
 # ---------------------------------------------------------------------
@@ -163,13 +166,14 @@ def read_stats(year, time_id=None):
     ds = xr.open_dataset(path, drop_variables=stats_vars)
 
     # do stats read, select for only MCSs that underwent complete lifecycle and in training period
+    # get rid of this.?
     complete_idx = ds['lifecycle_complete_flag'] == 1
     if time_id is None:
         time_idx = (ds['start_basetime'] >= np.datetime64(f'{year}-03-01')) & (ds['end_basetime'] < np.datetime64(f'{year}-09-01'))
     else:
         time_idx = (ds['start_basetime'] >= time_id[0]) & (ds['end_basetime'] <= time_id[-1] + np.timedelta64(21, 'h'))
 
-    select = complete_idx & time_idx
+    select = time_idx #& complete_idx
     good_tracks = ds.isel(tracks=select)
     track_idx = [i for i, v in enumerate(select) if v == True]  # need these to identify MCS mask in pixel level data
 
@@ -180,10 +184,15 @@ def get_track_stats(track):
     # hellish way to get timestamps in MSWEP dataset
     base_time = track['base_time']
     mask = np.isnat(base_time.values[()])
+    # shift by 6 steps for 2 extra times.?
     track = track.isel(times=~mask)  # select data-containing timesteps for all tracks
 
     eval_time = np.array([t if pd.Timestamp(t).hour in list(range(0, 22, 3)) else np.datetime64('nat') for t in track['base_time'].values[()]])
-    time_mask = eval_time == track['base_time'].values[()]
+    ## further mcs refinement..
+    #formed_mask = (track['lifecycle_stage'] == 2) | (track['lifecycle_stage'] == 3) | (track['lifecycle_stage'] == 4) | (track['lifecycle_stage'] == 5)
+    # refine to continental MCS
+    #loc_mask = (track['meanlon'] <= -85)
+    time_mask = (eval_time == track['base_time'].values[()]) #& loc_mask #& formed_mask
 
     '''
     # before sampling only MSWEP times agg total rain

@@ -48,16 +48,19 @@ LEV = np.array([
 ])
 
 COMP = False
-HOURLY = True
-DAILY = False
+HOURLY = False
+DAILY = True
 SEASONAL = False
 ANNUAL = False
 PRECIP = False
 PDF = False
 MCS = False
+MCS_MASK = False
 RET_AS_TNSR = False
-CESM = True
-CESM_EXP = '.CTRL'
+CESM = False
+CESM_EXP = ''
+SAVE = True
+
 # these dont seem to matter for testing..?
 C, D, H, W = 6, 28, 81, 145
 Q_SCALE_SUM = np.array([0.73947986, 0.79641958, 0.82545568, 0.85676614, 0.8690772,  0.85588648,
@@ -108,13 +111,13 @@ def main():
     parser = ArgumentParser()
     parser.add_argument('model_name', type=str)
     parser.add_argument('-e', '--exp', type=str)
-    parser.add_argument('-t', '--tag', type=str, default='')
+    parser.add_argument('-n', '--note', type=str, default='')
     parser.add_argument('-v', '--var', type=str, default='')
     args = parser.parse_args()
 
     model_name = args.model_name
     exp = args.exp
-    tag = args.tag
+    note = args.note
     test_var = args.var
 
     if torch.cuda.is_available():
@@ -125,7 +128,7 @@ def main():
 
     if CESM:
         mode = 'cesm'
-        tag += f'_CESM{CESM_EXP}'
+        note += f'_CESM{CESM_EXP}'
     else:
         mode = 'test'
 
@@ -153,9 +156,16 @@ def main():
         '''
         perturb_dict = {
             0: {
-                'var': 'Q',
-                'type': 'scale',
-                'scale': Q_SCALE_SUM,
+                'var': 'V',
+                'type': 'hshear',
+                'scale': .1,
+                'invert': False,
+                'levels': None,
+            },
+            1: {
+                'var': 'U',
+                'type': 'hshear',
+                'scale': .1,
                 'invert': False,
                 'levels': None,
             },
@@ -167,7 +177,7 @@ def main():
             test_loader,
             device,
             exp,
-            note=tag,
+            note=note,
             perturb_dict=perturb_dict,
         ) 
 
@@ -178,22 +188,11 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
     gridshape = (53, 65)  # (H, W)
     extent = (-110, -70, 25, 51)
     lons, lats = np.linspace(extent[0], extent[1], gridshape[1]), np.linspace(extent[2], extent[3], gridshape[0])
-
-    # plotting directives
-    precip_plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'pprecip'}
-    bias_plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'bias'}
-    clima_plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'clima'}
+    plot_params = {'extent': extent, 'lons': lons, 'lats': lats}
 
     # For un-standardizing predicted/target precip data
     with open(f'./models/{model_name}/norm_vars.json', 'r') as f:
         stats = json.load(f)
-        # for using CESM data -- these should be pre-stored now
-        stats['Z3mn'] = stats['Hmn']
-        stats['Z3std'] = stats['Hstd']
-        stats['Qmn'] = stats['QVmn']
-        stats['Qstd'] = stats['QVstd']
-        stats['PRECTmn'] = stats['precipitationmn']
-        stats['PRECTstd'] = stats['precipitationstd']
     mn_p = stats['precipitationmn']
     std_p = stats['precipitationstd']
 
@@ -214,10 +213,9 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
             # save coordinates of target for reuse
             out_coords = target_ds.coords
 
-            if MCS:
+            if MCS_MASK:  # do perturbations within/outside the MCS CCS
                 # get mask and valid times
                 mask, times = mcs.run(time_id)
-                # add MCS CCS mask to perturb_dict
                 if perturb_dict != {}:
                     for k in perturb_dict.keys():
                         perturb_dict[k]['region'] = mask
@@ -282,25 +280,6 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
             all_preds.append(pred_da)
             all_obs.append(obs_da)
 
-            if COMP:
-                # TODO: how does this work with no leap year..?
-                # just skips feb 29.? other days the 'same' tho? accessing by day of year seems wrong then?
-                # load mswep and regrid:
-                mswep_fs = futils._get_mswep_by_time(time_id, forecast_step=1)
-                mswep_ds = futils.read_target(
-                    mswep_fs,
-                    [],
-                    {
-                        'do': True,
-                        'target_grid': '~/AI/incept/pgrid.nc',
-                        'regrid_type': 'conservative'
-                    },
-                    lat=CUS_LAT,
-                    lon=CUS_LON
-                )
-                mswep_da = mswep_ds['precipitation'].rename('precip').compute()
-                all_comp.append(mswep_da)
-
     # Compile test performance metrics
     test_loss = torch.cat(losses, dim=0).numpy(force=True).flatten()
     all_pccs = torch.cat(pccs, dim=0).numpy(force=True).flatten()
@@ -308,10 +287,15 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
     test_pcc = np.mean(all_pccs)
     all_ets = torch.cat(ets, dim=0).numpy(force=True).flatten()
     test_ets = np.mean(all_ets)
-    print(f'Per-item mean MSE: {np.mean(test_loss)}', flush=True)
-    print(f'Per-item mean centered PCC: {test_pcc}', flush=True)
-    print(f'Items w/PCC > 0.7: {good_pccs} of {len(all_pccs)}, {good_pccs / len(all_pccs) * 100:.2f}%', flush=True)
-    print(f'Per-item mean ETS: {test_ets}', flush=True)
+    perf_txt = f'''Per-item mean MSE: {np.mean(test_loss)}
+Per-item mean centered PCC: {test_pcc}
+Items w/PCC > 0.7: {good_pccs} of {len(all_pccs)}, {good_pccs / len(all_pccs) * 100:.2f}%
+Per-item mean ETS: {test_ets}
+    '''
+    print(perf_txt)
+    if not CESM:
+        with open(f'./models/{model_name}/test_perf_{note}.txt', 'w') as f:
+            f.write(perf_txt)
 
     ## Output testing
     # Compile all predicted and observed precip data
@@ -330,22 +314,22 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
     complete = [complete_pred, complete_obs]
 
     if COMP:
-        complete_comp = xr.merge(all_comp)
-        complete_comp = complete_comp.sel(time=tmask)
-        complete.append(complete_comp)
+        times = complete_pred.time
+        mswep = xr.open_dataset('./MSWEP_1979-1983.nc').convert_calendar('noleap', use_cftime=True).sel(time=times)
+        complete.insert(1, mswep)
 
-    # TODO: do this for ~relevant~ perturbations as well then can easily reproduce
-    #complete_pred.to_netcdf(f'./DL_{season}_CESM{CESM_EXP}.nc', engine='netcdf4')
-    #complete_obs.to_netcdf(f'./CESM_{season}_CESM{CESM_EXP}.nc', engine='netcdf4')
-    #complete_comp.to_netcdf(f'./MSWEP_{season}_CESM{CESM_EXP}.nc', engine='netcdf4')
+    if SAVE:
+        complete_pred.to_netcdf(f'./models/{model_name}/MODEL_PRED{note}_all.nc', engine='netcdf4')
+        if not CESM:
+            complete_obs.to_netcdf(f'./models/{model_name}/MSWEP{note}_all.nc')
 
     # Plot precip from selected days
     if PRECIP:
-        precip(complete, season, precip_plot_params, model_name, note)
+        precip(complete, plot_params, model_name, note)
 
     # Hourly statistics
     if HOURLY:
-        hourly_stats(complete, bias_plot_params, clima_plot_params, season, model_name, note)
+        hourly_stats(complete, plot_params, model_name, note)
 
     # Daily statistics
     if DAILY:
@@ -353,11 +337,11 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
 
     # Seasonal statistics
     if SEASONAL:
-        seasonal_stats(complete, bias_plot_params, clima_plot_params, model_name, note)
+        seasonal_stats(complete, plot_params, model_name, note)
 
     # Annual statistics
     if ANNUAL:
-        annual_stats(complete_pred, complete_obs, bias_plot_params, clima_plot_params, model_name, note)
+        annual_stats(complete, plot_params, model_name, note)
 
 # ---------------------------------------------------------------------------------
 def feature_importance_stats(test_loss, all_ets, exp, season, perturb_dict, df_list):
@@ -452,7 +436,17 @@ def prep_model(model_name):
 # ---------------------------------------------------------------------------------
 def prep_loader(model_name, exp, mode='test'):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK']) if RET_AS_TNSR else 0
-    test_ds = OTPrecipDataset(mode, exp, model_name, standardize=False, shuffle=False, ret_as_tnsr=RET_AS_TNSR, cesm_exp=CESM_EXP)
+    test_ds = OTPrecipDataset(
+        mode,
+        exp,
+        model_name,
+        standardize=False,
+        shuffle=False,
+        ret_as_tnsr=RET_AS_TNSR,
+        sel_mcs=MCS,
+        cesm_exp=CESM_EXP
+    )
+
     def collate(batch):
         return batch
 

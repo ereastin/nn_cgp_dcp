@@ -11,7 +11,7 @@ import json
 import os
 import sys
 sys.path.append('/home/eastinev/ai')
-import utils
+import plot_utils as utils
 import paths as pth
 
 KEEP_PIX = [

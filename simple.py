@@ -7,28 +7,20 @@ from Components import *
 PRINT = False
 ROI = True
 ATTN = True
-N, D, H, W = 6, 28, 81, 145
+N, D, H, W = 4, 28, 81, 145
 # ---------------------------------------------------------------------------------
 def main():
-    base = 36
+    base = 30
     lin_act = 0.117
     Na, Nb, Nc = 5, 10, 5
     lr = 2.44e-04
     wd = 0.036
-    drop_p = 0.163
+    drop_p = 0.0
     bias = True
 
-    # use this insead of k3 s2?
-    #print(calc_shape_out(144, 0, 2, 37, 1))
-    #print(calc_shape_out(80, 0, 2, 21, 1))
-    #print(calc_shape_out(35, 0, 1, 18, 1))
-    #exit()
-
     net = Simple(N, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).cuda()
-    #print(net)
     test = torch.ones((1, N, D, H, W)).cuda()
     net(test)
-    #print(net)  doing 54, 42 is just too small with all the downsampling..
     s = (64, N, D, H, W)
     summary(net, input_size=s)
 

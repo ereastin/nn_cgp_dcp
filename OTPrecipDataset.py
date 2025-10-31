@@ -26,7 +26,7 @@ def main():
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
-        pd = OTPrecipDataset('train', 'cus', 'test_JJA_F00h', standardize=False, sel_mcs=True)
+        pd = OTPrecipDataset('train', 'cus', 'nR1_JJA_F00h', standardize=False, sel_mcs=True)
         t1 = time.time()
         for i, (s, t, tt) in enumerate(pd):
             print(tt)
@@ -65,10 +65,10 @@ class OTPrecipDataset(Dataset):
         self._LEAD_TIME_HOURS = int(forecast[1:3])
         self._FORECAST = False if self._LEAD_TIME_HOURS == 0 else True
         n_months = len(self.season)
-        mnth_offset = 6 if self.season == 'JJA' else 3
+        mn_offset = 'JFMAMJJASOND'.find(self.season) + 1
 
         yrs = list(range(2004, 2021)) if not self._CESM else list(range(1979, 1984))
-        mnths = list(range(mnth_offset, mnth_offset + n_months))
+        mnths = list(range(mn_offset, mn_offset + n_months))
         wks = list(range(4))
 
         data_splits_path = f'./models/{self.model_name}/data_splits.json'
@@ -123,6 +123,7 @@ class OTPrecipDataset(Dataset):
               STANDARDIZE: {self._STANDARDIZE}
               SHUFFLE: {self._SHUFFLE}
               RETURN TENSOR: {self._RET_AS_TNSR}
+              DROPPED VARS: {self._drop_vars}
         ''')
 
     # -----------------------------------------------------------------------------
@@ -265,6 +266,7 @@ class OTPrecipDataset(Dataset):
     def read_target(self, in_file, sel_time):
         ds = xr.open_mfdataset(in_file)
         ds = ds.drop_sel(time=sel_time) if DRY and self._MCS else ds.sel(time=sel_time)
+        ds = ds.where(ds >= 1, 0)  # filter for i guess 3-hour accum less than 1 mm.. as estimate of daily?
  
         if STATS:
             v = 'precipitation'
@@ -273,7 +275,7 @@ class OTPrecipDataset(Dataset):
             self._stats[v + 'var'].append(dav.var().data)
             self._stats['Np'].append(dav.count().data)
             return
-
+        
         if self._STANDARDIZE:
             for v in ds.variables:
                 if v in ['time', 'lat', 'lon', 'plev', 'lev']:

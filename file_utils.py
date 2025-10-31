@@ -16,7 +16,7 @@ import subprocess
 import json
 sys.path.append('/home/eastinev/ai')
 import paths as pth
-import utils
+import analysis_utils as utils
 
 ## ================================================================================
 # Necessary for composing filename requests
@@ -63,7 +63,7 @@ CONUS_LON = slice(-135, -45) # (-135, -45.625)
 CONUS_LAT = slice(18, 58) # (18.5, 58)
 CUS_LON = slice(-110 - 1, -70 + 1)
 CUS_LAT = slice(51 + 1, 25 - 1)  # mswep has these backwards, need buffer for remap
-F = 'CTRL'
+F = '2K'
 LEV = np.array([
     1000, 975, 950, 925, 900, 875, 850,
     825, 775, 700, 600, 550, 450, 400, 350, 300,
@@ -80,24 +80,12 @@ RM_WEEKS = [
 ]
 ## ================================================================================
 def main():
-    # Load MSWEPv2 and regrid
-    n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
-    cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)
-    os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
-    print(cluster, flush=True)
-    with Client(cluster) as client:
-        print(client, flush=True)
-        cesm_pth = '/scratch/eastinev/cus_cesm/P*.CTRL.nc'
-        cesm = open_mf(cesm_pth)
-        print(cesm)
-        cesm.to_netcdf('./CESM_1979-1983.nc', engine='netcdf4')
-    return
-    ## ======
     t1 = time.time()
     cdo = Cdo(tempdir=pth.TMP)
     cdo.debug = True
     t_strs = get_time_strs()
 
+    """
     fs = os.listdir(os.path.join(pth.SCRATCH, 'cus_cesm'))
     cesm_t_strs = []
     for f in fs:
@@ -110,6 +98,7 @@ def main():
     #    if t not in cesm_t_strs:
     #        print(t)
     #exit()
+    """
 
     n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
     cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)
@@ -120,17 +109,55 @@ def main():
 
         # do for CESM data
         for t in t_strs:
-            if t in cesm_t_strs:
-                continue
             yr, mn, wk = t[0], t[1], t[2]
-            p_out = os.path.join(pth.SCRATCH, 'cus_cesm', f'P_{yr}_{str(mn).zfill(2)}_{wk}.{F}.nc')
-            lsf_out = os.path.join(pth.SCRATCH, 'cus_cesm', f'LSF_{yr}_{str(mn).zfill(2)}_{wk}.{F}.nc')
+            ps_out = os.path.join(pth.SCRATCH, 'cus_cesm', f'PS_{yr}_{str(mn).zfill(2)}_{wk}.{F}.nc')
             curr_files = os.listdir(os.path.join(pth.SCRATCH, 'cus_cesm'))
-            if p_out.split(os.sep)[-1] in curr_files:
+            if ps_out.split(os.sep)[-1] in curr_files:
                 print(f'skipping {t}', flush=True)
                 continue
-            fs = _get_cesm_by_time(yr, mn, wk, exp=F)
             #fs = _get_cesm_merge_by_time(yr, mn, wk, exp=F)
+            fs = _get_cesm_by_time(yr, mn, wk, exp=F)
+            ## grabbing surface press
+            lat_slc = slice(17, 59)
+            lon_slc = slice(360-136, 360-44)
+            dt_range = _get_wk_days_no_leap(yr, mn, wk)
+            print(fs, dt_range)
+            a, b = dt_range[0].astype(str), dt_range[-1].astype(str)
+            t_slc = slice(a, b)
+            try:
+                ds = xr.open_mfdataset(fs).sel(time=t_slc, lat=lat_slc, lon=lon_slc)
+            except FileNotFoundError as e:
+                print(fs[0], 'missing')
+                continue
+            ds = ds.isel(time=slice(None, None, 3))['PS']
+            regrid_dict = {
+                'do': True,
+                'target_grid': '~/ai/incept/vgrid.nc',
+                'regrid_type': 'linear'  # is this bilinear.?
+            }
+            ds = utils.regrid(ds, regrid_dict)
+            ds = ds.compute()
+            ds = ds.astype(np.float32)
+            ds.to_netcdf(ps_out, engine='netcdf4')
+            continue
+        print('done')
+        return
+
+        # do for CESM data
+        for t in t_strs:
+            #if t in cesm_t_strs:
+            #    continue
+            yr, mn, wk = t[0], t[1], t[2]
+            #p_out = os.path.join(pth.SCRATCH, 'cus_cesm', f'P_{yr}_{str(mn).zfill(2)}_{wk}.{F}.nc')
+            #lsf_out = os.path.join(pth.SCRATCH, 'cus_cesm', f'LSF_{yr}_{str(mn).zfill(2)}_{wk}.{F}.nc')
+            ps_out = os.path.join(pth.SCRATCH, 'cus_cesm', f'PS_{yr}_{str(mn).zfill(2)}_{wk}.{F}.nc')
+            curr_files = os.listdir(os.path.join(pth.SCRATCH, 'cus_cesm'))
+            if ps_out.split(os.sep)[-1] in curr_files:
+                print(f'skipping {t}', flush=True)
+                continue
+            #fs = _get_cesm_by_time(yr, mn, wk, exp=F)
+            fs = _get_cesm_merge_by_time(yr, mn, wk, exp=F)
+            ### IDK
             dt_range = _get_wk_days_no_leap(yr, mn, wk)
             print(fs, dt_range)
             a, b = dt_range[0].astype(str), dt_range[-1].astype(str)
@@ -177,6 +204,7 @@ def main():
                         'regrid_type': 'linear'  # is this bilinear.?
                     },
                 )
+
                 print('writing precip...', flush=True)
                 write_cesm_precip(
                     ds,

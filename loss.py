@@ -33,6 +33,10 @@ def neg_relu(pred):
     return torch.mean(F.relu(-1 * pred))  # relu set neg values to 0 --> switch
 
 # ---------------------------------------------------------------------------------
+def neg_pen(pred):
+    return torch.sum(torch.where(pred < 0, 1, 0))
+
+# ---------------------------------------------------------------------------------
 def mae(pred, target):
     return F.l1_loss(pred, target)
 
@@ -153,7 +157,8 @@ class SqueezeNet(nn.Module):
 
         mse_loss = mse(pred, target)
         unstd_pred = unstd(pred.clone(), self.p_mn, self.p_std)
-        neg_pen_loss = neg_relu(unstd_pred)  # consider shifting this by one..? or use SELU or something.?
+        neg_pen_loss = neg_relu(unstd_pred)
+        #neg_pen_loss = neg_pen(unstd_pred)
         quantile_loss = quantile(pred, target, alpha=0.75)
         q2_loss = quantile(pred, target, alpha=0.95)
         #fft = fft(pred, target)
@@ -172,9 +177,9 @@ class SqueezeNet(nn.Module):
 
         perceptual_loss = F.mse_loss(_pred, _target)  # formerly mse!
 
-        #return 1e-3 * perceptual_loss + mse_loss + neg_pen_loss
-        #print(perceptual_loss.item(), mae_loss.item(), linex_loss.item(), neg_pen_loss.item())
-        return 1e-3 * perceptual_loss + 5 * quantile_loss + 2 * q2_loss + mse_loss + neg_pen_loss
+        #print(1e-3 * perceptual_loss.item(), mae_loss.item(), quantile_loss.item() * 5, 2 * q2_loss.item(), neg_pen_loss.item())
+        ## R1
+        return 1e-3 * perceptual_loss + 5 * quantile_loss + 2 * q2_loss + mae_loss + neg_pen_loss
 
 ## ================================================================================
 if __name__ == '__main__':

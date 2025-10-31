@@ -17,21 +17,14 @@ import time
 ## personal imports
 # models
 from TrainHelper import TrainHelper
-from InceptUNet3D import IRNv4_3DUNet
-from Incept3D import IRNv4_3D
-from InceptUNet import IRNv4UNet
-from v2 import UNet, MultiUNet
 from simple import Simple
-from simple2d import Simple2
 from Dummy import Dummy
 # datasets
-from PrecipDataset import PrecipDataset
 from OTPrecipDataset import OTPrecipDataset
 # other
 from decorators import timeit
 from loss import SqueezeNet
 
-# for Lazy module dry-runs.. handle this better for other input shapes
 C, D, H, W = 4, 28, 81, 145
 FROM_LOAD = False
 MCS = True

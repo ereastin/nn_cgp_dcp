@@ -27,14 +27,14 @@ from OTPrecipDataset import OTPrecipDataset
 from Networks import *
 from InceptUNet import IRNv4UNet
 from InceptUNet3D import IRNv4_3DUNet
-from v2 import MultiUNet
 from simple import Simple
 import mcs_data as mcs
 import file_utils as futils
 from analysis import *
+from analysis_utils import *
 
 sys.path.append('/home/eastinev/ai')
-import utils
+import plot_utils as utils
 import paths as pth
 
 CUS_LON = slice(-110 - 1, -70 + 1)
@@ -49,7 +49,7 @@ LEV = np.array([
 
 COMP = False
 HOURLY = False
-DAILY = True
+DAILY = False
 SEASONAL = False
 ANNUAL = False
 PRECIP = False
@@ -73,38 +73,6 @@ Q_SCALE_SPR = np.array([0.73484835, 0.7741839,  0.79289228, 0.78702883, 0.775256
  0.54781833, 0.52006356, 0.4883695,  0.44912579, 0.40702892, 0.35720196,
  0.36740634, 0.63666115, 0.76133438, 0.78194161, 0.77004798, 0.76141909,
  0.76900295, 0.78955253, 0.79839702, 0.81697179])
-'''
-## 4x - ctrl stuff
-pred = xr.open_dataset('./pred_sum_ctrl.nc')
-pred4x = xr.open_dataset('./pred_sum_4k.nc')
-bias = pred4x - pred
-
-# total seasonal mean daily precip bias
-utils.plot_mean(
-    {ssn: bias.sel(season=ssn)['precip'].as_numpy() for ssn in bias.season.values},
-    bias_plot_params,
-    model_name,
-    note='pred_sum_4x-ctrl_seasonal',
-    bias=True
-)
-return
-
-# 2012 - climatology stuff
-p2012 = xr.open_dataset('./pred2012.nc')
-pssn = xr.open_dataset('./predSSN.nc').sel(season='JJA')
-o2012 = xr.open_dataset('./obs2012.nc')
-ossn = xr.open_dataset('./obsSSN.nc').sel(season='JJA')
-pdiff = p2012 - pssn
-odiff = o2012 - ossn
-utils.plot_mean(
-    {'2012 - JJA Clima, PRED': pdiff['precip'].as_numpy()} | {'2012 - JJA Clima, OBS': odiff['precip'].as_numpy()},
-    bias_plot_params,
-    model_name,
-    note='2012_climadiff',
-    bias=True
-)
-return
-'''
 
 ## ================================================================================
 def main():
@@ -113,12 +81,14 @@ def main():
     parser.add_argument('-e', '--exp', type=str)
     parser.add_argument('-n', '--note', type=str, default='')
     parser.add_argument('-v', '--var', type=str, default='')
+    parser.add_argument('-x', '--drop', nargs='+', default=[])
     args = parser.parse_args()
 
     model_name = args.model_name
     exp = args.exp
     note = args.note
     test_var = args.var
+    drop_vars = args.drop
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -131,8 +101,9 @@ def main():
         note += f'_CESM{CESM_EXP}'
     else:
         mode = 'test'
+        if not MCS: note += '_all'
 
-    test_loader = prep_loader(model_name, exp, mode=mode)
+    test_loader = prep_loader(model_name, exp, mode=mode, drop_vars=drop_vars)
     model = prep_model(model_name)
     model = load_model(model, model_name, device)
 
@@ -141,6 +112,10 @@ def main():
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
+
+        ## Run Feature Importance Testing
+        #run_feature_importance(test_var, model, model_name, test_loader, device, exp, note)
+        #return
         '''
         Song 2019:
         Here, we use the zonal and meridional winds at three levels (925, 500, and 200 hPa)
@@ -154,20 +129,14 @@ def main():
         mid-level: 925-500 hPa
         LLJ: approx as 850 hPa winds (?)
         '''
+
         perturb_dict = {
             0: {
                 'var': 'V',
                 'type': 'hshear',
                 'scale': .1,
                 'invert': False,
-                'levels': None,
-            },
-            1: {
-                'var': 'U',
-                'type': 'hshear',
-                'scale': .1,
-                'invert': False,
-                'levels': None,
+                'levels': LEV[:7],
             },
         }
         perturb_dict = {}
@@ -200,6 +169,7 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
     all_preds, all_obs = [], []
     all_comp = []
     losses, pccs, ets = [], [], []
+    meas_time = []
 
     model = model.to(device)
     model.eval()
@@ -209,7 +179,7 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
         for i, (source_ds, target_ds, time_id) in enumerate(loader):
             if source_ds is None or target_ds is None: continue
 
-            print(f'Testing model on {time_id[0].astype(str)}-{time_id[-1].astype(str)}...')
+            print(f'Testing model on {time_id[0].astype(str)}-{time_id[-1].astype(str)}...', flush=True)
             # save coordinates of target for reuse
             out_coords = target_ds.coords
 
@@ -226,10 +196,10 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
 
             # identify w experiment type
             if i == 0:
-                note += utils.build_exp_note(perturb_dict)
+                note += build_exp_note(perturb_dict)
 
             # do input perturbation
-            source_ds = utils.perturb(source_ds, perturb_dict)
+            source_ds = perturb(source_ds, perturb_dict)
 
             # standardize after perturbation
             for v in source_ds.variables:
@@ -251,7 +221,10 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
 
             # send to device and predict
             source, target = source.to(device=device), target.to(device=device)
+            t1 = time.perf_counter_ns()
             pred = model(source)
+            t2 = time.perf_counter_ns()
+            meas_time.append((t2 - t1) / 10**6)  # milliseconds per batch
 
             # un-standardize
             pred, target = pred * std_p + mn_p, target * std_p + mn_p
@@ -265,20 +238,21 @@ def check_accuracy(model, model_name, loader, device, exp, note='', perturb_dict
             ets.append(utils.cum_ets(pred, target))
 
             # store in DataArray
-            pred_da = xr.DataArray(
-                data=pred.squeeze(1).numpy(force=True),
-                dims=('time', 'lat', 'lon'),
-                coords=out_coords,
-                name='precip'
-            )
-            obs_da = xr.DataArray(
-                data=target.squeeze(1).numpy(force=True),
-                dims=('time', 'lat', 'lon'),
-                coords=out_coords,
-                name='precip'
-            )
-            all_preds.append(pred_da)
-            all_obs.append(obs_da)
+            if SAVE:
+                pred_da = xr.DataArray(
+                    data=pred.squeeze(1).numpy(force=True),
+                    dims=('time', 'lat', 'lon'),
+                    coords=out_coords,
+                    name='precip'
+                )
+                obs_da = xr.DataArray(
+                    data=target.squeeze(1).numpy(force=True),
+                    dims=('time', 'lat', 'lon'),
+                    coords=out_coords,
+                    name='precip'
+                )
+                all_preds.append(pred_da)
+                all_obs.append(obs_da)
 
     # Compile test performance metrics
     test_loss = torch.cat(losses, dim=0).numpy(force=True).flatten()
@@ -293,35 +267,38 @@ Items w/PCC > 0.7: {good_pccs} of {len(all_pccs)}, {good_pccs / len(all_pccs) * 
 Per-item mean ETS: {test_ets}
     '''
     print(perf_txt)
-    if not CESM:
-        with open(f'./models/{model_name}/test_perf_{note}.txt', 'w') as f:
-            f.write(perf_txt)
+    total_time = np.sum(meas_time)
+    print(f'total time: {total_time}')
 
     ## Output testing
-    # Compile all predicted and observed precip data
-    complete_pred = xr.merge(all_preds)
-    complete_obs = xr.merge(all_obs)
-
-    # this handles the forecasting step leakage into other seasons by dropping..
-    # do custom seasons instead? or set back input fields instead of set forward precip field?
-    if season == 'JJA':
-        tmask = ~((complete_pred.time.dt.month == 9) & (complete_pred.time.dt.day == 1))
-    elif season == 'MAM':
-        tmask = ~((complete_pred.time.dt.month == 6) & (complete_pred.time.dt.day == 1))
-
-    complete_pred = complete_pred.sel(time=tmask)
-    complete_obs = complete_obs.sel(time=tmask)
-    complete = [complete_pred, complete_obs]
-
-    if COMP:
-        times = complete_pred.time
-        mswep = xr.open_dataset('./MSWEP_1979-1983.nc').convert_calendar('noleap', use_cftime=True).sel(time=times)
-        complete.insert(1, mswep)
-
     if SAVE:
-        complete_pred.to_netcdf(f'./models/{model_name}/MODEL_PRED{note}_all.nc', engine='netcdf4')
+        print(perf_txt)
         if not CESM:
-            complete_obs.to_netcdf(f'./models/{model_name}/MSWEP{note}_all.nc')
+            with open(f'./models/{model_name}/test_perf{note}.txt', 'w') as f:
+                f.write(perf_txt)
+
+        ## NOTE: careful here
+        # to save rmse and ets for each test item
+        #df = pd.DataFrame({'rmse': np.sqrt(test_loss), 'ets': all_ets})
+        #df.to_csv(f'./models/{model_name}/ctrl_test_stats.csv')
+
+        # Compile all predicted and observed precip data
+        complete_pred = xr.merge(all_preds)
+        complete_obs = xr.merge(all_obs)
+        complete = [complete_pred, complete_obs]
+
+        if COMP:
+            times = complete_pred.time
+            complete_comp = xr.open_dataset(f'./MSWEP_1979-1983.nc').convert_calendar('noleap', use_cftime=True).sel(time=times)
+            complete.insert(1, complete_comp)
+
+        complete_pred.to_netcdf(f'./models/{model_name}/MODEL_PRED{note}.nc', engine='netcdf4')
+        if not CESM:
+            complete_obs.to_netcdf(f'./models/{model_name}/MSWEP{note}.nc')
+
+    if df_list is not None:
+        df_list = feature_importance_stats(test_loss, all_ets, test_ets, test_pcc, good_pccs, model_name, perturb_dict, df_list)
+        return df_list
 
     # Plot precip from selected days
     if PRECIP:
@@ -344,18 +321,14 @@ Per-item mean ETS: {test_ets}
         annual_stats(complete, plot_params, model_name, note)
 
 # ---------------------------------------------------------------------------------
-def feature_importance_stats(test_loss, all_ets, exp, season, perturb_dict, df_list):
+def feature_importance_stats(test_loss, all_ets, test_ets, test_pcc, good_pccs, model_name, perturb_dict, df_list):
     # RMSE/ETS importance metrics:
-    # to save rmse and ets for each test item
-    #df = pd.DataFrame({'rmse': np.sqrt(test_loss), 'ets': all_ets})
-    #df.to_csv(f'./models/{model_name}/test_stats.csv')
-    #return
-    ctrl_df = pd.read_csv(f'./models/{model_name}/test_stats.csv')
+    ctrl_df = pd.read_csv(f'./models/{model_name}/ctrl_test_stats.csv')
     ctrl_loss = ctrl_df['rmse'].to_numpy()
     ctrl_ets = ctrl_df['ets'].to_numpy()
     Irmse = (np.sqrt(test_loss) - ctrl_loss) / ctrl_loss
     a1, b1, c1, d1 = calc_importance_stats(Irmse)
-    Iets = (ctrl_ets - all_ets) / (ctrl_ets + 1e-5)  # in case there are legit 0s.. why.? will these screw up ets metrics?
+    Iets = (ctrl_ets - all_ets) / (ctrl_ets + 1e-5)
     a2, b2, c2, d2 = calc_importance_stats(Iets)
     df_index = perturb_dict[0]['var'] + str(perturb_dict[0]['levels'])
     df = pd.DataFrame({
@@ -377,8 +350,8 @@ def feature_importance_stats(test_loss, all_ets, exp, season, perturb_dict, df_l
     return df_list
 
 # ---------------------------------------------------------------------------------
-# TODO: this needs args added or otherwise some fixing
-def run_feature_importance(test_var):
+def run_feature_importance(test_var, model, model_name, test_loader, device, exp, note):
+    print(f'running feature importance on {model_name} for {test_var}')
     df_list = []
     try:
         for v in [test_var]:
@@ -398,8 +371,7 @@ def run_feature_importance(test_var):
                     test_loader,
                     device,
                     exp,
-                    season,
-                    note=model_id_tag,
+                    note=note,
                     perturb_dict=perturb_dict,
                     df_list=df_list
                 )
@@ -434,7 +406,7 @@ def prep_model(model_name):
     return Simple(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
 
 # ---------------------------------------------------------------------------------
-def prep_loader(model_name, exp, mode='test'):
+def prep_loader(model_name, exp, mode='test', drop_vars=[]):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK']) if RET_AS_TNSR else 0
     test_ds = OTPrecipDataset(
         mode,
@@ -444,6 +416,7 @@ def prep_loader(model_name, exp, mode='test'):
         shuffle=False,
         ret_as_tnsr=RET_AS_TNSR,
         sel_mcs=MCS,
+        drop_vars=drop_vars,
         cesm_exp=CESM_EXP
     )
 

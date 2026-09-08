@@ -16,30 +16,37 @@ LEV = np.array([
 ])
 
 ## ================================================================================
-def main():
-    fig, ax = plt.subplots(layout='constrained')
+def run():
+    fig, axs = plt.subplots(1, 2, layout='constrained', sharey=True)
     metric = 'ets'
-    model_name = 'noQW_JJA_F00h'
-    stats = []
-    for v in SHRT_MERRA_VARS:
-        df = pd.read_csv(f'./models/{model_name}/{v}_shuffle.csv', index_col=0)
-        for index, data in df.iterrows():
-            stats.append({
-                'label': index,
-                'mean': data[f'{metric}_imp_mean'],
-                'med': data[f'{metric}_imp_med'],
-                'q1': data[f'{metric}_imp_25p'],
-                'q3': data[f'{metric}_imp_75p'],
-                'whislo': data[f'{metric}_imp_25p'],
-                'whishi': data[f'{metric}_imp_75p']
-            })
-    stats = sorted(stats, key=lambda x: x['med'], reverse=True)
-    stats = stats[:10]
-    ax.bxp(stats, showfliers=False, showmeans=True, meanline=True)
-    ax.set_xticklabels(ax.get_xticklabels(), fontsize=10, rotation=45, ha='right', rotation_mode='anchor')
-    ax.set(title=f'Feature Importance for {model_name}', ylabel=f'{metric.upper()} Importance')#, ylim=(-.05, .6))
-    plt.axhline(y=0, color='gray', linewidth=1, linestyle='--')
-    plt.savefig(f'./models/{model_name}/{metric}_bxplt.png', dpi=300)
+    models = ['test2_JJA_F00h', 'noQW_JJA_F00h']
+    for model_name, ax in zip(models, axs):
+        stats = []
+        for v in MERRA_VARS:
+            try:
+                df = pd.read_csv(f'./models/{model_name}/{v}_shuffle.csv', index_col=0)
+            except FileNotFoundError as e:
+                continue
+            for index, data in df.iterrows():
+                stats.append({
+                    'label': index,
+                    'mean': data[f'{metric}_imp_mean'],
+                    'med': data[f'{metric}_imp_med'],
+                    'q1': data[f'{metric}_imp_25p'],
+                    'q3': data[f'{metric}_imp_75p'],
+                    'whislo': data[f'{metric}_imp_25p'],
+                    'whishi': data[f'{metric}_imp_75p']
+                })
+        stats = sorted(stats, key=lambda x: x['med'], reverse=True)
+        stats = stats[:10]
+        ax.bxp(stats, showfliers=False, showmeans=True, meanline=True)
+        ax.set_xticklabels(ax.get_xticklabels(), fontsize=10, rotation=45, ha='right', rotation_mode='anchor')
+        ax.axhline(y=0, color='gray', linewidth=1, linestyle='--')
+
+    axs[0].set(title='DL All', ylabel=f'{metric.upper()} Importance', box_aspect=1)
+    axs[1].set(title='DL Large-scale', box_aspect=1)
+    return fig
+    #plt.savefig(f'./models/combined_{metric}_bxplt.png', dpi=300)
 
 ## ================================================================================
 def combine(model_name):

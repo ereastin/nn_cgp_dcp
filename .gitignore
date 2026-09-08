@@ -4,6 +4,8 @@ models/*
 *.csv
 *.sl
 *.png
+*.pdf
+.ipynb_checkpoints/
 scratch.py
 *.nc
 *.nc4

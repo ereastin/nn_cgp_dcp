@@ -53,18 +53,23 @@ def _perturb(ds, instructions):
 
     # do perturbation
     match perturb_type:
-        case 'scale':  # can we do a per-level scaling? can then move mean 4X vprofile to CTRL
-            ds[perturb_var].loc[dict(lev=plvls)] = xr.where(region > 0, ds[perturb_var] * scale, ds[perturb_var])
-        case 'vshear':  # low-level vertical wind shear thought to be important for MCS (Rotunno '88), also LLJs for moisture?
+        case 'scale':
+            scaled = xr.where(region > 0, ds[perturb_var] * scale, ds[perturb_var])
+            ds[perturb_var] = scaled 
+        case 'vshear':
             # remove per-column vertical shear -> set field at each cell to mean of cell across p-lvls
-            # TODO: this is way slow with the compute.. but can't multi-dim index with dask.. ?/
-            ds = ds.compute()
-            masked = xr.where(region > 0, ds[perturb_var], region).mean(dim='lev', skipna=True)
-            ds[perturb_var].loc[dict(lat=lats, lon=lons)] = xr.where(region > 0, masked, ds[perturb_var])
+            vert_hom = mass_wtd_mean(ds[perturb_var].where(region > 0))
+            ds[perturb_var] = xr.where(region > 0, vert_hom, ds[perturb_var])
         case 'hshear':
             # remove horizontal shear -> set field at each p-lvl to mean of p-lvl
-            masked = xr.where(region > 0, ds[perturb_var], region).mean(dim=['lat', 'lon'], skipna=True)
-            ds[perturb_var].loc[dict(lev=plvls)] = xr.where(region > 0, masked, ds[perturb_var])
+            hor_hom = lat_wtd_mean(ds[perturb_var].where(region > 0), dim=['lat', 'lon'])
+            ds[perturb_var] = xr.where(region > 0, hor_hom, ds[perturb_var])
+        case 'hshear_lat':
+            lat_hom = lat_wtd_mean(ds[perturb_var].where(region > 0), dim=['lat'])
+            ds[perturb_var] = xr.where(region > 0, lat_hom, ds[perturb_var])
+        case 'hshear_lon':
+            lon_hom = ds[perturb_var].where(region > 0).mean(dim=['lon'])
+            ds[perturb_var] = xr.where(region > 0, lon_hom, ds[perturb_var])
         case 'mean':
             ds[perturb_var].loc[dict(lev=plvls)] = ds[perturb_var].mean(dim='time')
         case 'shuffle':
@@ -95,12 +100,11 @@ def perturb(ds, perturb_dict):
     return ds
 
 # ---------------------------------------------------------------------------------
-def build_exp_note(perturb_dict):
+def build_exp_note(perturb_dict, note):
     if perturb_dict == {}:
-        return ''
+        return note
     else:        
         # scale, vshear, hshear, shuffle, mask?, levels?
-        note = ''
         for _id, instr in perturb_dict.items():
             v, t, s = instr['var'], instr['type'], instr['scale']
             if type(s) != float or type(s) != int:
@@ -125,24 +129,22 @@ def build_exp_note(perturb_dict):
         return note
 
 # ---------------------------------------------------------------------------------
-def lat_wtd_sum(da):
-    wt = np.cos(np.radians(da.lat))
-    return da.weighted(wt).sum(dim=['lat', 'lon'], skipna=True)
+def mass_wtd_mean(da):
+    thickness = np.insert(np.abs(np.diff(da.lev)), 0, np.nan).astype(np.float32)
+    thickness_da = xr.DataArray(data=thickness, coords={'lev': da.lev}).fillna(0)
+    layer_wind = da.rolling(lev=2).mean()
+    return layer_wind.weighted(thickness_da).mean(dim='lev', skipna=True, keep_attrs=True)
 
 # ---------------------------------------------------------------------------------
-def lat_wtd_mean(da):
-    wt = np.cos(np.radians(da.lat))
-    return da.weighted(wt).mean(dim=['lat', 'lon'], skipna=True)
-
-# ---------------------------------------------------------------------------------
-def latonly_wtd_mean(da):
-    wt = np.cos(np.radians(da.lat))
-    return da.weighted(wt).mean(dim='lat', skipna=True)
+def lat_wtd_mean(da, dim=['lat']):
+    wt = np.cos(np.radians(da.lat), dtype=np.float32)
+    return da.weighted(wt).mean(dim=dim, skipna=True, keep_attrs=True)
 
 # ---------------------------------------------------------------------------------
 def calc_qsat(T, p):
     # modified Tetens formula; see Simmons et al. (1999)
     # 'Stratospheric water vapour and tropical tropopause temperatures in ECMWF analyses and multi-year simulations'
+    # pressures are in Pa
     eps = 0.622  # ratio of dry air and water vapor gas constants
 
     def esat_ice(T):
